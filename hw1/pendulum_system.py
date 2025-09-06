@@ -17,13 +17,15 @@ def simulate_system(init_state, h, t_total):
     t_array = np.arange(0.0, t_total, h)
     n = len(t_array)
     hist = np.zeros((2,n), dtype = np.float64)
+    
+    p,q = init_state
+    hist[:,0] = [p,q]
 
-    state = init_state.reshape(2,)
-    hist[:,0] = state
-    for i,t in tqdm(enumerate(t_array)):
-        state[0] = state[0] - np.sin(state[1])
-        state[1] = state[1] + state[0]
-        hist[:,i] = state
+    for i in tqdm(range(1,n)):
+        p = p - h * np.sin(q)
+        q = q + h * p
+        hist[:,i] = [p,q]
+
     return hist
 
 # generate 3 different cases, save out to csv
