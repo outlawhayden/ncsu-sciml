@@ -4,15 +4,12 @@ import jax
 import platform
 from flax import nnx
 import optax
-import scipy
-from scipy.spatial.distance import cdist
-from scipy.integrate import RK45
-import matplotlib.pyplot as plt
-from sklearn.model_selection import train_test_split
 import equinox as eqx
 from tqdm import tqdm
+from sklearn.model_selection import train_test_split
+import optuna
 
-## BACKEND AUTOCONFIG - find GPU if it's there
+## BACKEND AUTOCONFIG
 print("\nconfiguring backend...")
 system = platform.system()
 machine = platform.machine().lower()
@@ -39,16 +36,16 @@ print("backend selected:\n", jax.default_backend())
 print("active devices:\n", jax.devices())
 print("--------------------\n")
 
-
+# Seed
 seed = 42
 np.random.seed(seed)
 key = jax.random.key(seed)
-depth = 2 # based on dnn_depth
-num_epochs = 100000
-width = 50  # fixed hidden width
 
+num_epochs = 10000   # maximum epochs
+width = 50           # fixed hidden width
+patience = 200       # <-- early stopping patience
 
-# load dataset, t/t split
+# Load dataset
 print("loading data...")
 try:
     data = np.load('hw2_p3_data.npz')
@@ -69,7 +66,7 @@ print("xtr:", X_train.shape, "xts:", X_test.shape)
 print("ytr:", y_train.shape, "yts", y_test.shape)
 
 
-# primitive definitions
+# === Primitive definitions ===
 class Linear(eqx.Module):
     weight: jax.Array
     bias: jax.Array
@@ -101,12 +98,11 @@ class MLP(eqx.Module):
         return x
 
 
-# loss fn (L2)
+# === Loss ===
 def loss_fn(model, x, y):
     pred_y = jax.vmap(model)(x)
     return jnp.mean((y - pred_y) ** 2)
 
-# train and eval step
 @eqx.filter_jit
 def train_step(model, opt_state, x, y, optimizer):
     loss, grads = eqx.filter_value_and_grad(loss_fn)(model, x, y)
@@ -118,41 +114,72 @@ def train_step(model, opt_state, x, y, optimizer):
 def eval_step(model, x, y):
     return loss_fn(model, x, y)
 
-# iterate over depths
-all_train_hist = {}
-all_test_hist = {}
 
-lrs = [1e-1, 1e-2, 1e-3, 1e-4, 1e-5]
+# === Activations to sweep ===
+acts = {
+    "gelu": jax.nn.gelu,
+    "sigmoid": jax.nn.sigmoid,
+    "relu": jax.nn.relu,
+    "relu6": jax.nn.relu6,
+    "softmax": jax.nn.softmax,
+    "softplus": jax.nn.softplus,
+    "leaky_relu": jax.nn.leaky_relu,
+}
 
-for i, lr in enumerate(lrs):  # iterate learningrates 
-    print(f"\n=== Training model with lr {lr} ===")
-    # Build architecture: input, [hidden]*depth, output
+
+# === Optuna objective ===
+def objective(trial):
+    act_name = trial.suggest_categorical("activation", list(acts.keys()))
+    depth = trial.suggest_int("depth", 2, 5)
+    lr = trial.suggest_loguniform("lr", 1e-5, 1e-1)
+
+    activation = acts[act_name]
     arch = [x_tr.shape[1]] + [width] * depth + [y_tr.shape[0]]
-    model = MLP(arch, key, activation=jax.nn.softmax)
+    model = MLP(arch, key, activation=activation)
 
     optimizer = optax.adam(lr)
     opt_state = optimizer.init(eqx.filter(model, eqx.is_inexact_array))
 
     train_hist, test_hist = [], []
-    for epoch in tqdm(range(num_epochs)):
+    best_loss = float("inf")
+    patience_counter = 0
+
+    for epoch in range(num_epochs):
         model, opt_state, train_loss = train_step(model, opt_state, X_train, y_train, optimizer)
         test_loss = eval_step(model, X_test, y_test)
 
         train_hist.append(float(train_loss))
         test_hist.append(float(test_loss))
 
-    all_train_hist[f"depth{lr}"] = np.array(train_hist)
-    all_test_hist[f"depth{lr}"] = np.array(test_hist)
+        # Early stopping logic
+        if test_loss < best_loss - 1e-8:  # small tolerance
+            best_loss = float(test_loss)
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print(f"Trial {trial.number}: Early stopping at epoch {epoch}")
+                break
 
-    print(f"Final test loss (lr {lr}):", test_hist[-1])
+    # save trajectories for this trial
+    np.savez(
+        f"trial_{trial.number}_losses.npz",
+        train=np.array(train_hist),
+        test=np.array(test_hist),
+        act=act_name,
+        depth=depth,
+        lr=lr,
+    )
+
+    return best_loss
 
 
-print("saving out results...")
-np.savez(
-    "dnn_losses_lr_sweep.npz",
-    lrs=np.array(lrs, dtype=str),   # store learning rates as strings
-    **all_train_hist,
-    **{k+"_test": v for k, v in all_test_hist.items()}
-)
+# === Run study ===
+if __name__ == "__main__":
+    study = optuna.create_study(direction="minimize")
+    study.optimize(objective, n_trials=30)  # adjust n_trials as desired
 
-print("loss histories saved to dnn_losses_lr_sweep.npz")
+    print("Best trial:")
+    trial = study.best_trial
+    print("  Value:", trial.value)
+    print("  Params:", trial.params)
