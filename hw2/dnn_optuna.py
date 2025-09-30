@@ -42,9 +42,9 @@ seed = 42
 np.random.seed(seed)
 key = jax.random.key(seed)
 
-num_epochs = 10000   # maximum epochs
+num_epochs = 100000   # maximum epochs
 width = 50           # fixed hidden width
-patience = 200       # early stopping patience
+patience = 3000       # early stopping patience
 
 # Load dataset
 print("loading data...")
@@ -141,7 +141,7 @@ def objective(trial):
     lr = trial.suggest_loguniform("lr", 1e-5, 1e-1)
 
     activation = acts[act_name]
-    arch = [x_tr.shape[1]] + [width] * depth + [y_tr.shape[0]]
+    arch = [x_tr.shape[1]] + [width] * depth + [y_tr.shape[1]]
     model = MLP(arch, key, activation=activation)
 
     optimizer = optax.adam(lr)
@@ -204,6 +204,7 @@ if __name__ == "__main__":
         trial_epochs=np.array(trial_epochs),
         total_time=total_elapsed,
     )
+
 
         # Save best parameters
     trial = study.best_trial

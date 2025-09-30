@@ -125,7 +125,7 @@ all_test_hist = {}
 for depth in range(2, 6):  # depths 2 → 5
     print(f"\n=== Training model with depth {depth} ===")
     # Build architecture: input, [hidden]*depth, output
-    arch = [x_tr.shape[1]] + [width] * depth + [y_tr.shape[0]]
+    arch = [x_tr.shape[1]] + [width] * depth + [y_tr.shape[1]]
     model = MLP(arch, key, activation=jax.nn.relu)
 
     optimizer = optax.adam(lr)

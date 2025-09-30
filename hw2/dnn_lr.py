@@ -127,7 +127,7 @@ lrs = [1e-1, 1e-2, 1e-3, 1e-4, 1e-5]
 for i, lr in enumerate(lrs):  # iterate learningrates 
     print(f"\n=== Training model with lr {lr} ===")
     # Build architecture: input, [hidden]*depth, output
-    arch = [x_tr.shape[1]] + [width] * depth + [y_tr.shape[0]]
+    arch = [x_tr.shape[1]] + [width] * depth + [y_tr.shape[1]]
     model = MLP(arch, key, activation=jax.nn.softmax)
 
     optimizer = optax.adam(lr)

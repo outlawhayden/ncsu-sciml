@@ -43,10 +43,12 @@ print("--------------------\n")
 seed = 42
 np.random.seed(seed)
 key = jax.random.key(seed)
-depth = 2 # based on dnn_depth
-lr = 0.1
-num_epochs = 100000
-width = 50  # fixed hidden width
+depth = 2
+lr = 0.060964532
+act = 'gelu'
+num_epochs = 10000
+width = 50
+patience = 3000
 
 
 # load dataset, t/t split
@@ -60,7 +62,7 @@ except:
     raise RuntimeError("error loading dataset.\n")
 
 indices = np.arange(len(x_tr))
-train_idx, test_idx = train_test_split(indices, test_size=0.33, random_state=seed)
+train_idx, test_idx = train_test_split(indices, test_size=0.33, random_state=seed, shuffle = True)
 
 X_train, X_test = jnp.array(x_tr[train_idx]), jnp.array(x_tr[test_idx])
 y_train, y_test = jnp.array(y_tr[train_idx]), jnp.array(y_tr[test_idx])
@@ -119,9 +121,6 @@ def train_step(model, opt_state, x, y, optimizer):
 def eval_step(model, x, y):
     return loss_fn(model, x, y)
 
-# iterate over depths
-all_train_hist = {}
-all_test_hist = {}
 
 acts = {
     "sigmoid": jax.nn.sigmoid,
@@ -133,32 +132,48 @@ acts = {
     "leaky_relu": jax.nn.leaky_relu,
 }
 
-for name, act in acts.items():
-    print(f"\n=== Training model with activation {name} ===")
-    arch = [x_tr.shape[1]] + [width] * depth + [y_tr.shape[1]]
-    model = MLP(arch, key, activation=act)
+arch = [x_tr.shape[1]] + [width] * depth + [y_tr.shape[1]]
+model = MLP(arch, key, activation=acts[act])
 
-    optimizer = optax.adam(lr)
-    opt_state = optimizer.init(eqx.filter(model, eqx.is_inexact_array))
+optimizer = optax.adam(lr)
+opt_state = optimizer.init(eqx.filter(model, eqx.is_inexact_array))
 
-    train_hist, test_hist = [], []
-    for epoch in tqdm(range(num_epochs)):
-        model, opt_state, train_loss = train_step(model, opt_state, X_train, y_train, optimizer)
-        test_loss = eval_step(model, X_test, y_test)
+train_hist, test_hist = [], []
+best_loss = float("inf")
+patience_counter = 0
+epochs_run = 0
 
-        train_hist.append(float(train_loss))
-        test_hist.append(float(test_loss))
 
-    # Use the string name as the key
-    all_train_hist[f"{name}"] = np.array(train_hist)
-    all_test_hist[f"{name}"] = np.array(test_hist)
+for epoch in tqdm(range(num_epochs)):
+    model, opt_state, train_loss = train_step(model, opt_state, X_train, y_train, optimizer)
+    test_loss = eval_step(model, X_test, y_test)
 
-    print(f"Final test loss ({name}):", test_hist[-1])
+    train_hist.append(float(train_loss))
+    test_hist.append(float(test_loss))
+
+    if test_loss < best_loss - 1e-8:
+        best_loss = float(test_loss)
+        patience_counter = 0
+    else:
+        patience_counter += 1
+        if patience_counter >= patience:
+            break
+
+
+# Use the string name as the key
+all_train_hist = np.array(train_hist)
+all_test_hist = np.array(test_hist)
+
+print(f"Final test loss :", test_hist[-1])
 
 print("saving out results...")
 np.savez(
     "dnn_losses_act_sweep.npz",
-    **all_train_hist,
-    **{f"{k}_test": v for k, v in all_test_hist.items()}
+    all_train_hist,
+    all_test_hist
 )
-print("loss histories saved to dnn_losses_act_sweep.npz")
+print("loss histories saved to dnn_losses_optimal_sweep.npz")
+
+model_filename = "dnn_model_opt.eqx"
+eqx.tree_serialise_leaves(model_filename, model)
+print(f"trained model saved to {model_filename}")
