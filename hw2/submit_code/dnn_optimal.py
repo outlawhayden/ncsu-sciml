@@ -11,17 +11,6 @@ import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 import equinox as eqx
 from tqdm import tqdm
-from mpl_toolkits.mplot3d import Axes3D  # registers 3D projection
-
-
-
-
-seed = 42
-np.random.seed(seed)
-key = jax.random.key(seed)
-depth = 2
-width = 50
-
 
 ## BACKEND AUTOCONFIG - find GPU if it's there
 print("\nconfiguring backend...")
@@ -50,9 +39,22 @@ print("backend selected:\n", jax.default_backend())
 print("active devices:\n", jax.devices())
 print("--------------------\n")
 
+
+seed = 42
+np.random.seed(seed)
+key = jax.random.key(seed)
+depth = 2
+lr = 0.060964532
+act = 'gelu'
+num_epochs = 100000
+width = 50
+patience = 5000
+
+
+# load dataset, t/t split
 print("loading data...")
 try:
-    data = np.load('hw2_p3_data.npz')
+    data = np.load('/Users/haydenoutlaw/Documents/Courses/SciML/ncsu-sciml/hw2/hw2_p3_data.npz')
     x_tr = data['x_tr']
     y_tr = data['y_tr']
     print("dataset loaded.\n")
@@ -60,7 +62,7 @@ except:
     raise RuntimeError("error loading dataset.\n")
 
 indices = np.arange(len(x_tr))
-train_idx, test_idx = train_test_split(indices, test_size=0.33, random_state=seed)
+train_idx, test_idx = train_test_split(indices, test_size=0.33, random_state=seed, shuffle = True)
 
 X_train, X_test = jnp.array(x_tr[train_idx]), jnp.array(x_tr[test_idx])
 y_train, y_test = jnp.array(y_tr[train_idx]), jnp.array(y_tr[test_idx])
@@ -68,7 +70,6 @@ y_train, y_test = jnp.array(y_tr[train_idx]), jnp.array(y_tr[test_idx])
 print("dataset format:")
 print("xtr:", X_train.shape, "xts:", X_test.shape)
 print("ytr:", y_train.shape, "yts", y_test.shape)
-
 
 
 # primitive definitions
@@ -120,86 +121,52 @@ def train_step(model, opt_state, x, y, optimizer):
 def eval_step(model, x, y):
     return loss_fn(model, x, y)
 
+# activation function name -> jax.nn handle
+acts = {
+    "sigmoid": jax.nn.sigmoid,
+    "relu": jax.nn.relu,
+    "relu6": jax.nn.relu6,
+    "gelu": jax.nn.gelu,
+    "softmax": jax.nn.softmax,
+    "softplus": jax.nn.softplus,
+    "leaky_relu": jax.nn.leaky_relu,
+}
 
 arch = [x_tr.shape[1]] + [width] * depth + [y_tr.shape[1]]
-new_model = MLP(arch, key, activation=jax.nn.gelu)
-new_model = eqx.tree_deserialise_leaves("dnn_model_opt.eqx", new_model)
+model = MLP(arch, key, activation=acts[act])
 
+optimizer = optax.adam(lr)
+opt_state = optimizer.init(eqx.filter(model, eqx.is_inexact_array))
 
-# sample random points from x_tr
-key, subkey = jax.random.split(key)
-num_samples = 500
-idx = jax.random.choice(subkey, x_tr.shape[0], (num_samples,), replace=False)
+train_hist, test_hist = [], []
+best_loss = float("inf")
+best_loss = float("inf")
+patience_counter = 0
 
-X_sample = jnp.array(x_tr[idx])
-Y_true = jnp.array(y_tr[idx]).flatten()
-Y_pred = jax.vmap(lambda x: new_model(x), in_axes=0)(X_sample)
+for epoch in tqdm(range(num_epochs)):
+    model, opt_state, train_loss = train_step(model, opt_state, X_train, y_train, optimizer)
+    test_loss = eval_step(model, X_test, y_test)
 
-# convert everything to flat numpy arrays of shape (500,)
-X_sample = np.array(X_sample)
-Y_true   = np.array(Y_true).reshape(-1)
-Y_pred   = np.array(Y_pred).reshape(-1)
-print(Y_true.shape)
-print(Y_pred.shape)
-errors   = np.abs(Y_true - Y_pred)
+    train_hist.append(float(train_loss))
+    test_hist.append(float(test_loss))
 
-from scipy.interpolate import griddata
+    if test_loss < best_loss - 1e-8:
+        best_loss = float(test_loss)
+        patience_counter = 0
+        # immediately save best model
+        eqx.tree_serialise_leaves("dnn_model_opt.eqx", model)
+    else:
+        patience_counter += 1
+        if patience_counter >= patience:
+            break
 
-# Define a grid over your input domain
-n_grid = 1000
-x1_min, x1_max = x_tr[:,0].min(), x_tr[:,0].max()
-x2_min, x2_max = x_tr[:,1].min(), x_tr[:,1].max()
-xx1, xx2 = np.meshgrid(
-    np.linspace(x1_min, x1_max, n_grid),
-    np.linspace(x2_min, x2_max, n_grid)
+# histories
+np.savez(
+    "dnn_losses_optimal_sweep.npz",
+    np.array(train_hist),
+    np.array(test_hist)
 )
 
-# Flatten grid for prediction
-X_grid = jnp.array(np.column_stack([xx1.ravel(), xx2.ravel()]))
-
-# Predict on grid
-Y_grid_pred = jax.vmap(new_model)(X_grid)
-Y_grid_pred = np.array(Y_grid_pred).reshape(n_grid, n_grid)
-
-# Interpolate ground truth onto the same grid
-Y_grid_true = griddata(x_tr, y_tr.flatten(), (xx1, xx2), method='cubic')
-
-# Compute shared vmin/vmax across both surfaces
-vmin = min(np.nanmin(Y_grid_true), np.nanmin(Y_grid_pred))
-vmax = max(np.nanmax(Y_grid_true), np.nanmax(Y_grid_pred))
-
-# Plot heatmaps with shared color scale
-fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-im1 = axes[0].imshow(
-    Y_grid_true,
-    extent=(x1_min, x1_max, x2_min, x2_max),
-    origin="lower",
-    aspect="auto",
-    cmap="viridis",
-    vmin=vmin,
-    vmax=vmax,
-)
-axes[0].set_title("True Surface (interpolated)")
-axes[0].set_xlabel("x1")
-axes[0].set_ylabel("x2")
-
-im2 = axes[1].imshow(
-    Y_grid_pred,
-    extent=(x1_min, x1_max, x2_min, x2_max),
-    origin="lower",
-    aspect="auto",
-    cmap="viridis",
-    vmin=vmin,
-    vmax=vmax,
-)
-axes[1].set_title("Predicted Surface")
-axes[1].set_xlabel("x1")
-axes[1].set_ylabel("x2")
-plt.tight_layout()
-
-fig.colorbar(im1, ax=axes, orientation="vertical", shrink=0.7, location="right")
-
-
-plt.savefig("sample_pred.png", dpi=300)
-plt.show()
+print(f"Best test loss : {best_loss}")
+print("loss histories saved to dnn_losses_optimal_sweep.npz")
+print("best model saved to dnn_model_opt.eqx")

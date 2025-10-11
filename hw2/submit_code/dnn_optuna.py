@@ -37,7 +37,6 @@ print("backend selected:\n", jax.default_backend())
 print("active devices:\n", jax.devices())
 print("--------------------\n")
 
-# Seed
 seed = 42
 np.random.seed(seed)
 key = jax.random.key(seed)
@@ -67,7 +66,7 @@ print("xtr:", X_train.shape, "xts:", X_test.shape)
 print("ytr:", y_train.shape, "yts", y_test.shape)
 
 
-# === Primitive definitions ===
+# primitive definitions
 class Linear(eqx.Module):
     weight: jax.Array
     bias: jax.Array
@@ -99,7 +98,7 @@ class MLP(eqx.Module):
         return x
 
 
-# === Loss ===
+# loss fn (L2)
 def loss_fn(model, x, y):
     pred_y = jax.vmap(model)(x)
     return jnp.mean((y - pred_y) ** 2)
@@ -116,7 +115,7 @@ def eval_step(model, x, y):
     return loss_fn(model, x, y)
 
 
-# === Activations to sweep ===
+# dict of activation functions, name -> jax.nn 
 acts = {
     "sigmoid": jax.nn.sigmoid,
     "relu": jax.nn.relu,
@@ -127,19 +126,21 @@ acts = {
     "leaky_relu": jax.nn.leaky_relu,
 }
 
-# === Trial timings and epochs storage ===
+
 trial_times = []
 trial_epochs = []
 
 
-# === Optuna objective ===
+# optuna wrapper. 1 trial is one trained model. incorporates timing 
 def objective(trial):
     start_time = time.time()
 
+    # suggest is attr for next best config based on prior data
     act_name = trial.suggest_categorical("activation", list(acts.keys()))
     depth = trial.suggest_int("depth", 2, 5)
     lr = trial.suggest_loguniform("lr", 1e-5, 1e-1)
 
+    # initialize model
     activation = acts[act_name]
     arch = [x_tr.shape[1]] + [width] * depth + [y_tr.shape[1]]
     model = MLP(arch, key, activation=activation)
@@ -152,6 +153,7 @@ def objective(trial):
     patience_counter = 0
     epochs_run = 0
 
+    # train model, same as linear search cases
     for epoch in range(num_epochs):
         model, opt_state, train_loss = train_step(model, opt_state, X_train, y_train, optimizer)
         test_loss = eval_step(model, X_test, y_test)
@@ -160,7 +162,8 @@ def objective(trial):
         test_hist.append(float(test_loss))
         epochs_run = epoch + 1
 
-        # Early stopping
+
+        # early stopping logic (inc threshold specified here)
         if test_loss < best_loss - 1e-8:
             best_loss = float(test_loss)
             patience_counter = 0
@@ -170,7 +173,7 @@ def objective(trial):
                 print(f"Trial {trial.number}: Early stopping at epoch {epoch}")
                 break
 
-    # Save trajectories and metadata
+    # save trajectories along w hyperparams
     np.savez(
         f"trial_{trial.number}_losses.npz",
         train=np.array(train_hist),
@@ -181,7 +184,7 @@ def objective(trial):
         epochs_run=epochs_run,
     )
 
-    # Record time and epoch count
+    # record time, num epochs
     elapsed = time.time() - start_time
     trial_times.append(elapsed)
     trial_epochs.append(epochs_run)
@@ -190,14 +193,14 @@ def objective(trial):
     return best_loss
 
 
-# === Run study ===
+# script call
 if __name__ == "__main__":
     overall_start = time.time()
     study = optuna.create_study(direction="minimize")
     study.optimize(objective, n_trials=20)  # adjust n_trials as desired
     total_elapsed = time.time() - overall_start
 
-    # Save timings and epochs
+    # save and export
     np.savez(
         "timings.npz",
         trial_times=np.array(trial_times),
@@ -206,7 +209,6 @@ if __name__ == "__main__":
     )
 
 
-        # Save best parameters
     trial = study.best_trial
     best_params = trial.params
     np.savez(
